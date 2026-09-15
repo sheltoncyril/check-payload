@@ -159,6 +159,7 @@ func (c *ConfigFile) Add(add *ConfigFile) error {
 	c.FilterDirs = appendUniq("filter_dirs", &err, c.FilterDirs, add.FilterDirs)
 	c.FilterImages = appendUniq("filter_images", &err, c.FilterImages, add.FilterImages)
 	c.CertifiedDistributions = appendUniq("certified_distributions", &err, c.CertifiedDistributions, add.CertifiedDistributions)
+	c.RustDeniedCrypto = appendUniq("rust_denied_crypto", &err, c.RustDeniedCrypto, add.RustDeniedCrypto)
 
 	c.FIPSCertifiedModules = mergeFIPSModules(c.FIPSCertifiedModules, add.FIPSCertifiedModules)
 

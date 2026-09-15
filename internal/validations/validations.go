@@ -20,6 +20,7 @@ import (
 
 	"github.com/openshift/check-payload/internal/golang"
 	"github.com/openshift/check-payload/internal/rpm"
+	"github.com/openshift/check-payload/internal/rust"
 	"github.com/openshift/check-payload/internal/types"
 )
 
@@ -80,7 +81,34 @@ type Baton struct {
 	GoVersion   *semver.Version
 	GoBuildInfo *buildinfo.BuildInfo
 	GoSymTable  *gosym.Table
+	RustAudit   *rust.Sbom
 	ModulesUsed []string
+}
+
+// defaultDeniedRustCrypto is the fallback when config omits rust_denied_crypto.
+var defaultDeniedRustCrypto = map[string]struct{}{
+	// bundled or alternative TLS/crypto stacks
+	"ring": {}, "rustls": {}, "aws-lc-rs": {}, "aws-lc-sys": {}, "aws-lc-fips-sys": {},
+	"boring": {}, "boring-sys": {}, "openssl-src": {},
+	// RustCrypto primitives
+	"sha1": {}, "sha2": {}, "sha3": {}, "md-5": {}, "hmac": {}, "aes": {}, "aes-gcm": {},
+	"chacha20poly1305": {}, "ctr": {}, "cbc": {}, "rsa": {}, "ecdsa": {},
+	"ed25519-dalek": {}, "curve25519-dalek": {}, "x25519-dalek": {}, "p256": {}, "p384": {},
+}
+
+// rustDeniedCrypto is the active denylist, overridable via SetRustDeniedCrypto.
+var rustDeniedCrypto = defaultDeniedRustCrypto
+
+// SetRustDeniedCrypto replaces the active denylist from config, or keeps the fallback if empty.
+func SetRustDeniedCrypto(crates []string) {
+	if len(crates) == 0 {
+		return
+	}
+	m := make(map[string]struct{}, len(crates))
+	for _, c := range crates {
+		m[c] = struct{}{}
+	}
+	rustDeniedCrypto = m
 }
 
 type ValidationFn func(ctx context.Context, path string, baton *Baton) *types.ValidationError
@@ -99,6 +127,11 @@ var validationFns = map[string][]ValidationFn{
 	"exe": {
 		validateNotStatic,
 		validateExeOpenssl,
+	},
+	"rust": {
+		validateNotStatic,         // a static Rust binary carries its own crypto
+		validateExeOpenssl,        // record system-OpenSSL linkage for the report
+		validateRustBundledCrypto, // fail on a bundled backend (symbols or manifest)
 	},
 }
 
@@ -456,6 +489,59 @@ func isGoExecutable(path string, baton *Baton) (bool, error) {
 	return true, nil
 }
 
+// isRustExecutable reports whether path is a Rust binary, and caches its
+// cargo-auditable manifest on the baton for the crypto validator.
+func isRustExecutable(path string, baton *Baton) (bool, error) {
+	exe, err := elf.Open(path)
+	if err != nil {
+		return false, nil
+	}
+	defer exe.Close()
+
+	if !rust.IsRustExecutable(exe) {
+		return false, nil
+	}
+	// A Rust binary without cargo-auditable is still Rust. The validator warns.
+	if sbom, err := rust.ReadAuditable(exe); err == nil {
+		baton.RustAudit = sbom
+	}
+	return true, nil
+}
+
+// validateRustBundledCrypto fails a Rust binary carrying crypto outside the system
+// OpenSSL provider, corroborating two signals: defined symbols and the manifest.
+func validateRustBundledCrypto(_ context.Context, path string, baton *Baton) *types.ValidationError {
+	var symbols []string
+	if exe, err := elf.Open(path); err == nil {
+		symbols = rust.BundledCryptoBackends(exe)
+		exe.Close()
+	}
+	var crates []string
+	if baton.RustAudit != nil {
+		crates = baton.RustAudit.LinkedCrypto(rustDeniedCrypto)
+	}
+	return classifyRustCrypto(symbols, crates, baton.RustAudit != nil)
+}
+
+// classifyRustCrypto turns the two signals into a result: either fails the binary,
+// clean-but-no-manifest warns (a pure-Rust primitive leaves no symbol).
+func classifyRustCrypto(symbols, crates []string, hasManifest bool) *types.ValidationError {
+	var parts []string
+	if len(symbols) > 0 {
+		parts = append(parts, "symbols: "+strings.Join(symbols, ", "))
+	}
+	if len(crates) > 0 {
+		parts = append(parts, "manifest: "+strings.Join(crates, ", "))
+	}
+	if len(parts) > 0 {
+		return types.NewValidationError(fmt.Errorf("%w (%s)", types.ErrRustBundledCrypto, strings.Join(parts, "; ")))
+	}
+	if !hasManifest {
+		return &types.ValidationError{Level: types.Warning, Error: types.ErrRustNoAuditable}
+	}
+	return nil
+}
+
 // isStatic tells if exe is a static binary.
 func isStatic(exe *elf.File) bool {
 	for _, p := range exe.Progs {
@@ -517,10 +603,19 @@ func ScanBinary(ctx context.Context, topDir, innerPath string, rpmIgnores map[st
 	if err != nil {
 		return res.SetError(err)
 	}
+	rustBinary := false
+	if !goBinary {
+		if rustBinary, err = isRustExecutable(path, baton); err != nil {
+			return res.SetError(err)
+		}
+	}
 	var checks []ValidationFn
-	if goBinary {
+	switch {
+	case goBinary:
 		checks = validationFns["go"]
-	} else {
+	case rustBinary:
+		checks = validationFns["rust"]
+	default:
 		checks = validationFns["exe"]
 	}
 

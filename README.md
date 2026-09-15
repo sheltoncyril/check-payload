@@ -174,6 +174,17 @@ JDK validations run through a pipeline:
 1. validateSystemProperties - ensures pertinent [FIPS property values](https://access.redhat.com/documentation/en-us/openjdk/8/html/configuring_openjdk_8_on_rhel_with_fips/config-fips-in-openjdk) are not being set at runtime
 1. validateAlgorithms - ensures unacceptable algorithms and protocols are disabled at runtime
 
+#### Rust Executables
+
+Rust executables are detected by their cargo-auditable section or the `rustc` producer string, then checked for crypto that runs outside the system OpenSSL FIPS provider. Two independent signals are corroborated so neither is trusted alone:
+
+1. A symbol scan for a bundled crypto backend (ring, a vendored or static OpenSSL, BoringSSL, or aws-lc). Backends are detected by their defined symbols, not by crate name. Undefined imports of the same names resolve to the system libcrypto and are the compliant case, so they are not flagged.
+1. The cargo-auditable manifest, matched against the `rust_denied_crypto` denylist for crates that bundle crypto, including the pure-Rust primitives that leave no symbol.
+
+Either signal fails the binary. A binary with no cargo-auditable manifest and no bundled-backend symbol is reported as a warning. A pure-Rust primitive leaves no symbol, so it cannot be ruled out from the binary alone. Building Rust binaries with `cargo auditable` gives the manifest the second signal relies on.
+
+The denylist is configured via `rust_denied_crypto` in the config file. It is a best-effort, non-exhaustive supplement to the structural symbol scan, and is extended in config rather than in code.
+
 ### Printer
 
 The printer aggregates all the results and formats into a table, csv, markdown, etc. If any errors are found then the process exits non-zero. A successful run returns 0.

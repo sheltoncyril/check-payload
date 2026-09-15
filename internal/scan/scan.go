@@ -45,6 +45,7 @@ func ValidateApplicationDependencies(apps []string) error {
 }
 
 func RunOperatorScan(ctx context.Context, cfg *types.Config) []*types.ScanResults {
+	validations.SetRustDeniedCrypto(cfg.RustDeniedCrypto)
 	tag := &v1.TagReference{
 		From: &corev1.ObjectReference{
 			Name: cfg.ContainerImage,
@@ -54,6 +55,7 @@ func RunOperatorScan(ctx context.Context, cfg *types.Config) []*types.ScanResult
 }
 
 func RunPayloadScan(ctx context.Context, cfg *types.Config) ([]*types.ScanResults, error) {
+	validations.SetRustDeniedCrypto(cfg.RustDeniedCrypto)
 	var runs []*types.ScanResults
 
 	payload, err := GetPayload(cfg)
@@ -127,6 +129,7 @@ func ValidateTag(ctx context.Context, cfg *types.Config, tag *v1.TagReference, r
 }
 
 func RunLocalScan(ctx context.Context, cfg *types.Config, localBundlePath string) []*types.ScanResults {
+	validations.SetRustDeniedCrypto(cfg.RustDeniedCrypto)
 	var runs []*types.ScanResults
 
 	// Simulate payload based on local directory structure

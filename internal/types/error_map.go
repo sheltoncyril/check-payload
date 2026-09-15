@@ -22,4 +22,6 @@ var KnownErrors = map[string]error {
 	"ErrLibcryptoSoMissing": ErrLibcryptoSoMissing,
 	"ErrNotDynLinked": ErrNotDynLinked,
 	"ErrOSNotCertified": ErrOSNotCertified,
+	"ErrRustBundledCrypto": ErrRustBundledCrypto,
+	"ErrRustNoAuditable": ErrRustNoAuditable,
 }
