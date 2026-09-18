@@ -145,6 +145,58 @@ func TestLinkedCrypto(t *testing.T) {
 	}
 }
 
+func TestCryptoModuleCandidates(t *testing.T) {
+	denied := map[string]struct{}{
+		"ring": {}, "sha2": {}, "openssl-src": {}, "aws-lc-fips-sys": {}, "aws-lc-sys": {},
+	}
+
+	tests := []struct {
+		name    string
+		sbom    *Sbom
+		symbols []string
+		want    []string
+	}{
+		{
+			name:    "no manifest falls back to symbol backends",
+			symbols: []string{"ring", "bundled-openssl"},
+			want:    []string{"bundled-openssl", "ring"},
+		},
+		{
+			name:    "manifest crate and its symbol backend dedup to one name",
+			sbom:    &Sbom{Packages: []Package{{Name: "ring", Kind: "runtime"}}},
+			symbols: []string{"ring"},
+			want:    []string{"ring"},
+		},
+		{
+			name:    "precise fips crate suppresses the coarse aws-lc symbol",
+			sbom:    &Sbom{Packages: []Package{{Name: "aws-lc-fips-sys", Kind: "build"}}},
+			symbols: []string{"aws-lc"},
+			want:    []string{"aws-lc-fips-sys"},
+		},
+		{
+			name:    "symbol backend with no manifest crate of its family is kept",
+			sbom:    &Sbom{Packages: []Package{{Name: "serde", Kind: "runtime"}}},
+			symbols: []string{"aws-lc"},
+			want:    []string{"aws-lc"},
+		},
+		{
+			name: "pure-Rust primitive from the manifest with no symbol",
+			sbom: &Sbom{Packages: []Package{{Name: "sha2", Kind: "runtime"}}},
+			want: []string{"sha2"},
+		},
+		{
+			name: "clean binary yields no candidate",
+			sbom: &Sbom{Packages: []Package{{Name: "serde", Kind: "runtime"}}},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, CryptoModuleCandidates(tt.sbom, denied, tt.symbols))
+		})
+	}
+}
+
 func TestParseAuditable(t *testing.T) {
 	want := &Sbom{Packages: []Package{
 		{Name: "ring", Version: "0.17.14", Kind: "runtime"},

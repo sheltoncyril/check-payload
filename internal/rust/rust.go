@@ -85,10 +85,42 @@ func ParseAuditable(compressed []byte) (*Sbom, error) {
 	return &sbom, nil
 }
 
-// nativeSourceCrates compile crypto into the runtime binary yet normally appear
-// as build dependencies, so they are matched regardless of Cargo dependency kind.
+// nativeSourceCrates link runtime crypto but appear as build deps, so kind is ignored.
 var nativeSourceCrates = map[string]struct{}{
 	"openssl-src": {}, "aws-lc-sys": {}, "aws-lc-fips-sys": {}, "boring-sys": {},
+}
+
+// backendFamilies maps a symbol backend to same-provider crate names. A symbol
+// backend is dropped when the manifest already names a crate in its family.
+var backendFamilies = map[string][]string{
+	"aws-lc":          {"aws-lc-rs", "aws-lc-sys", "aws-lc-fips-sys"},
+	"boringssl":       {"boring", "boring-sys"},
+	"bundled-openssl": {"openssl-src"},
+	"ring":            {"ring"},
+}
+
+// CryptoModuleCandidates names the bundled crypto providers a binary carries, as
+// module names the certified-module path can attest. Manifest crate names win over
+// the coarser symbol backends.
+func CryptoModuleCandidates(sbom *Sbom, denied map[string]struct{}, symbolBackends []string) []string {
+	crates := sbom.LinkedCrypto(denied)
+	out := slices.Clone(crates)
+	for _, backend := range symbolBackends {
+		if !familyNamed(backendFamilies[backend], crates) {
+			out = append(out, backend)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+func familyNamed(family, crates []string) bool {
+	for _, c := range crates {
+		if slices.Contains(family, c) {
+			return true
+		}
+	}
+	return false
 }
 
 // LinkedCrypto returns denied crypto crates linked in. Build and dev deps are

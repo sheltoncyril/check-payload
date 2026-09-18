@@ -10,11 +10,11 @@ import (
 	"github.com/openshift/check-payload/internal/types"
 )
 
-func TestValidateRustBundledCryptoFailsClosedOnCorruptManifest(t *testing.T) {
+func TestValidateRustCryptoFailsClosedOnCorruptManifest(t *testing.T) {
 	// A present-but-unparseable manifest must fail as an error, not fall through
 	// to the absent-manifest warning.
 	baton := &Baton{RustAuditErr: errors.New("zlib: invalid header")}
-	got := validateRustBundledCrypto(context.Background(), "", baton)
+	got := validateRustCrypto(context.Background(), "", baton)
 	require.NotNil(t, got)
 	require.Equal(t, types.Error, got.Level)
 	require.ErrorIs(t, got.Error, types.ErrRustInvalidAuditable)
@@ -34,40 +34,63 @@ func TestSetRustDeniedCrypto(t *testing.T) {
 	require.Empty(t, rustDeniedCrypto)
 }
 
+func TestSetRustCertifiedModules(t *testing.T) {
+	orig := rustCertifiedModules
+	t.Cleanup(func() { rustCertifiedModules = orig })
+
+	SetRustCertifiedModules([]types.FipsModule{{Module: "aws-lc-fips-sys"}, {Module: "openssl"}})
+	require.Contains(t, rustCertifiedModules, "aws-lc-fips-sys")
+	require.Contains(t, rustCertifiedModules, "openssl")
+
+	SetRustCertifiedModules(nil)
+	require.Empty(t, rustCertifiedModules)
+}
+
+func certSet(modules ...string) map[string]struct{} {
+	m := make(map[string]struct{}, len(modules))
+	for _, mod := range modules {
+		m[mod] = struct{}{}
+	}
+	return m
+}
+
 func TestClassifyRustCrypto(t *testing.T) {
 	tests := []struct {
-		name        string
-		symbols     []string
-		crates      []string
-		hasManifest bool
-		wantNil     bool
-		wantLevel   types.ErrorLevel
-		wantIs      error
-		wantMsgHas  []string
+		name         string
+		candidates   []string
+		hasManifest  bool
+		certified    map[string]struct{}
+		wantAttested []string
+		wantNil      bool
+		wantLevel    types.ErrorLevel
+		wantIs       error
+		wantMsgHas   []string
 	}{
 		{
-			name:       "bundled backend in symbols fails",
-			symbols:    []string{"ring"},
+			name:       "detected provider without attestation fails and names it",
+			candidates: []string{"ring"},
+			certified:  certSet("openssl", "go"),
 			wantLevel:  types.Error,
 			wantIs:     types.ErrRustBundledCrypto,
-			wantMsgHas: []string{"symbols: ring"},
+			wantMsgHas: []string{"ring"},
 		},
 		{
-			name:        "denied crate in manifest fails",
-			crates:      []string{"sha2"},
-			hasManifest: true,
-			wantLevel:   types.Error,
-			wantIs:      types.ErrRustBundledCrypto,
-			wantMsgHas:  []string{"manifest: sha2"},
+			name:         "detected provider with attestation passes and is recorded",
+			candidates:   []string{"aws-lc-fips-sys"},
+			hasManifest:  true,
+			certified:    certSet("aws-lc-fips-sys"),
+			wantNil:      true,
+			wantAttested: []string{"aws-lc-fips-sys"},
 		},
 		{
-			name:        "both signals fail and both are reported",
-			symbols:     []string{"ring"},
-			crates:      []string{"sha2"},
-			hasManifest: true,
-			wantLevel:   types.Error,
-			wantIs:      types.ErrRustBundledCrypto,
-			wantMsgHas:  []string{"symbols: ring", "manifest: sha2"},
+			name:         "mixed attested and unattested fails naming only the unattested",
+			candidates:   []string{"aws-lc-fips-sys", "sha2"},
+			hasManifest:  true,
+			certified:    certSet("aws-lc-fips-sys"),
+			wantLevel:    types.Error,
+			wantIs:       types.ErrRustBundledCrypto,
+			wantMsgHas:   []string{"sha2"},
+			wantAttested: []string{"aws-lc-fips-sys"},
 		},
 		{
 			name:        "clean with manifest passes",
@@ -82,7 +105,8 @@ func TestClassifyRustCrypto(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyRustCrypto(tt.symbols, tt.crates, tt.hasManifest)
+			attested, got := classifyRustCrypto(tt.candidates, tt.hasManifest, tt.certified)
+			require.Equal(t, tt.wantAttested, attested)
 			if tt.wantNil {
 				require.Nil(t, got)
 				return

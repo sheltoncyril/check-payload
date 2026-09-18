@@ -78,27 +78,41 @@ type Baton struct {
 	GoNoCrypto   bool
 	GoNativeFIPS bool
 
-	GoVersion    *semver.Version
-	GoBuildInfo  *buildinfo.BuildInfo
-	GoSymTable   *gosym.Table
-	RustAudit    *rust.Sbom
-	RustAuditErr error
-	ModulesUsed  []string
+	GoVersion          *semver.Version
+	GoBuildInfo        *buildinfo.BuildInfo
+	GoSymTable         *gosym.Table
+	RustAudit          *rust.Sbom
+	RustAuditErr       error
+	RustCryptoBackends []string
+	ModulesUsed        []string
 }
 
-// rustDeniedCrypto is the active denylist, set from config by SetRustDeniedCrypto.
-// The default config.toml is embedded, so the list always has a shipped floor.
+// rustDeniedCrypto is the manifest-signal denylist. getConfig unions the embedded
+// floor into it, so an explicit --config cannot shrink it below the shipped set.
 var rustDeniedCrypto map[string]struct{}
 
-// SetRustDeniedCrypto sets the active denylist from config. Every scan entrypoint
-// (RunOperatorScan, RunPayloadScan, RunLocalScan, RunNodeScan) must call this
-// before scanning; a nil denylist silently disables the manifest crypto signal.
+// SetRustDeniedCrypto sets the denylist. Call once per scan before workers start,
+// so it stays race-free. An empty list disables the manifest signal.
 func SetRustDeniedCrypto(crates []string) {
 	m := make(map[string]struct{}, len(crates))
 	for _, c := range crates {
 		m[c] = struct{}{}
 	}
 	rustDeniedCrypto = m
+}
+
+// rustCertifiedModules holds the module names attested in fips_certified_modules.
+// A detected Rust provider passes the inline gate only if it is named here.
+var rustCertifiedModules map[string]struct{}
+
+// SetRustCertifiedModules records the attested module names. Call once per scan
+// before workers start, so it stays race-free.
+func SetRustCertifiedModules(modules []types.FipsModule) {
+	m := make(map[string]struct{}, len(modules))
+	for _, mod := range modules {
+		m[mod.Module] = struct{}{}
+	}
+	rustCertifiedModules = m
 }
 
 type ValidationFn func(ctx context.Context, path string, baton *Baton) *types.ValidationError
@@ -119,9 +133,9 @@ var validationFns = map[string][]ValidationFn{
 		validateExeOpenssl,
 	},
 	"rust": {
-		validateNotStatic,         // a static Rust binary carries its own crypto
-		validateExeOpenssl,        // record system-OpenSSL linkage for the report
-		validateRustBundledCrypto, // fail on a bundled backend (symbols or manifest)
+		validateNotStatic,  // a static Rust binary carries its own crypto
+		validateExeOpenssl, // record system-OpenSSL linkage for the report
+		validateRustCrypto, // require detected crypto to be an attested module
 	},
 }
 
@@ -491,6 +505,7 @@ func isRustExecutable(path string, baton *Baton) (bool, error) {
 	if !rust.IsRustExecutable(exe) {
 		return false, nil
 	}
+	baton.RustCryptoBackends = rust.BundledCryptoBackends(exe)
 	// A Rust binary without cargo-auditable is still Rust. An absent manifest
 	// warns. A present-but-unparseable one is recorded to fail closed.
 	if sbom, err := rust.ReadAuditable(exe); err != nil {
@@ -501,43 +516,39 @@ func isRustExecutable(path string, baton *Baton) (bool, error) {
 	return true, nil
 }
 
-// validateRustBundledCrypto fails a Rust binary carrying crypto outside the system
-// OpenSSL provider, corroborating two signals: defined symbols and the manifest.
-func validateRustBundledCrypto(_ context.Context, path string, baton *Baton) *types.ValidationError {
+// validateRustCrypto fails unless every detected bundled crypto provider is an
+// attested certified module. Attested ones become module candidates for the
+// certified-module phase. An unattested one fails inline, covering the node RPM scan.
+func validateRustCrypto(_ context.Context, _ string, baton *Baton) *types.ValidationError {
 	// A present-but-unparseable manifest is corrupt audit evidence. Fail closed
 	// rather than fall through to the absent-manifest warning.
 	if baton.RustAuditErr != nil {
 		return types.NewValidationError(fmt.Errorf("%w: %w", types.ErrRustInvalidAuditable, baton.RustAuditErr))
 	}
-	var symbols []string
-	if exe, err := elf.Open(path); err == nil {
-		symbols = rust.BundledCryptoBackends(exe)
-		exe.Close()
-	}
-	var crates []string
-	if baton.RustAudit != nil {
-		crates = baton.RustAudit.LinkedCrypto(rustDeniedCrypto)
-	}
-	return classifyRustCrypto(symbols, crates, baton.RustAudit != nil)
+	candidates := rust.CryptoModuleCandidates(baton.RustAudit, rustDeniedCrypto, baton.RustCryptoBackends)
+	attested, verr := classifyRustCrypto(candidates, baton.RustAudit != nil, rustCertifiedModules)
+	baton.ModulesUsed = append(baton.ModulesUsed, attested...)
+	return verr
 }
 
-// classifyRustCrypto turns the two signals into a result: either fails the binary,
-// clean-but-no-manifest warns (a pure-Rust primitive leaves no symbol).
-func classifyRustCrypto(symbols, crates []string, hasManifest bool) *types.ValidationError {
-	var parts []string
-	if len(symbols) > 0 {
-		parts = append(parts, "symbols: "+strings.Join(symbols, ", "))
+// classifyRustCrypto splits candidates into attested modules and unattested
+// failures. No candidate and no manifest is inconclusive and warns.
+func classifyRustCrypto(candidates []string, hasManifest bool, certified map[string]struct{}) ([]string, *types.ValidationError) {
+	var attested, unattested []string
+	for _, m := range candidates {
+		if _, ok := certified[m]; ok {
+			attested = append(attested, m)
+		} else {
+			unattested = append(unattested, m)
+		}
 	}
-	if len(crates) > 0 {
-		parts = append(parts, "manifest: "+strings.Join(crates, ", "))
+	if len(unattested) > 0 {
+		return attested, types.NewValidationError(fmt.Errorf("%w (%s)", types.ErrRustBundledCrypto, strings.Join(unattested, ", ")))
 	}
-	if len(parts) > 0 {
-		return types.NewValidationError(fmt.Errorf("%w (%s)", types.ErrRustBundledCrypto, strings.Join(parts, "; ")))
+	if len(candidates) == 0 && !hasManifest {
+		return nil, types.NewValidationError(types.ErrRustNoAuditable).SetWarning()
 	}
-	if !hasManifest {
-		return &types.ValidationError{Level: types.Warning, Error: types.ErrRustNoAuditable}
-	}
-	return nil
+	return attested, nil
 }
 
 // isStatic tells if exe is a static binary.

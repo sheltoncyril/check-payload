@@ -26,7 +26,7 @@ var (
 	ErrFipsArtifactVersionHigh     = errors.New("FIPS certified artifact version above certified maximum")
 	ErrGoFIPSNotEnabled            = errors.New("go binary does not set GODEBUG fips140={auto,on,only}")
 	ErrGoFIPSNotCertified          = errors.New("go binary not built with GOFIPS140 FIPS module")
-	ErrRustBundledCrypto           = errors.New("rust binary bundles unvalidated crypto instead of the system OpenSSL provider")
+	ErrRustBundledCrypto           = errors.New("rust binary uses bundled crypto that is not an attested FIPS-certified module")
 	ErrRustNoAuditable             = errors.New("rust binary lacks a cargo-auditable manifest; bundled crypto cannot be ruled out (build with cargo-auditable)")
 	ErrRustInvalidAuditable        = errors.New("rust binary has an unparseable cargo-auditable manifest")
 )

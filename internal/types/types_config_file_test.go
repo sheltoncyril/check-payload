@@ -316,3 +316,25 @@ func TestConfigMerge(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyRustDeniedFloor(t *testing.T) {
+	floor := []string{"ring", "aws-lc-rs", "sha2"}
+
+	testCases := []struct {
+		name     string
+		start    []string
+		expected []string
+	}{
+		{"empty config gets the full floor", nil, floor},
+		{"custom crate is kept and the floor is added", []string{"custom"}, []string{"custom", "ring", "aws-lc-rs", "sha2"}},
+		{"overlap is not duplicated", []string{"ring"}, []string{"ring", "aws-lc-rs", "sha2"}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &types.ConfigFile{RustDeniedCrypto: tc.start}
+			cfg.ApplyRustDeniedFloor(floor)
+			assert.Equal(t, tc.expected, cfg.RustDeniedCrypto)
+		})
+	}
+}
