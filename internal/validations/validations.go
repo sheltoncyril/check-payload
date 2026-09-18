@@ -78,32 +78,22 @@ type Baton struct {
 	GoNoCrypto   bool
 	GoNativeFIPS bool
 
-	GoVersion   *semver.Version
-	GoBuildInfo *buildinfo.BuildInfo
-	GoSymTable  *gosym.Table
-	RustAudit   *rust.Sbom
-	ModulesUsed []string
+	GoVersion    *semver.Version
+	GoBuildInfo  *buildinfo.BuildInfo
+	GoSymTable   *gosym.Table
+	RustAudit    *rust.Sbom
+	RustAuditErr error
+	ModulesUsed  []string
 }
 
-// defaultDeniedRustCrypto is the fallback when config omits rust_denied_crypto.
-var defaultDeniedRustCrypto = map[string]struct{}{
-	// bundled or alternative TLS/crypto stacks
-	"ring": {}, "rustls": {}, "aws-lc-rs": {}, "aws-lc-sys": {}, "aws-lc-fips-sys": {},
-	"boring": {}, "boring-sys": {}, "openssl-src": {},
-	// RustCrypto primitives
-	"sha1": {}, "sha2": {}, "sha3": {}, "md-5": {}, "hmac": {}, "aes": {}, "aes-gcm": {},
-	"chacha20poly1305": {}, "ctr": {}, "cbc": {}, "rsa": {}, "ecdsa": {},
-	"ed25519-dalek": {}, "curve25519-dalek": {}, "x25519-dalek": {}, "p256": {}, "p384": {},
-}
+// rustDeniedCrypto is the active denylist, set from config by SetRustDeniedCrypto.
+// The default config.toml is embedded, so the list always has a shipped floor.
+var rustDeniedCrypto map[string]struct{}
 
-// rustDeniedCrypto is the active denylist, overridable via SetRustDeniedCrypto.
-var rustDeniedCrypto = defaultDeniedRustCrypto
-
-// SetRustDeniedCrypto replaces the active denylist from config, or keeps the fallback if empty.
+// SetRustDeniedCrypto sets the active denylist from config. Every scan entrypoint
+// (RunOperatorScan, RunPayloadScan, RunLocalScan, RunNodeScan) must call this
+// before scanning; a nil denylist silently disables the manifest crypto signal.
 func SetRustDeniedCrypto(crates []string) {
-	if len(crates) == 0 {
-		return
-	}
 	m := make(map[string]struct{}, len(crates))
 	for _, c := range crates {
 		m[c] = struct{}{}
@@ -501,8 +491,11 @@ func isRustExecutable(path string, baton *Baton) (bool, error) {
 	if !rust.IsRustExecutable(exe) {
 		return false, nil
 	}
-	// A Rust binary without cargo-auditable is still Rust. The validator warns.
-	if sbom, err := rust.ReadAuditable(exe); err == nil {
+	// A Rust binary without cargo-auditable is still Rust. An absent manifest
+	// warns. A present-but-unparseable one is recorded to fail closed.
+	if sbom, err := rust.ReadAuditable(exe); err != nil {
+		baton.RustAuditErr = err
+	} else {
 		baton.RustAudit = sbom
 	}
 	return true, nil
@@ -511,6 +504,11 @@ func isRustExecutable(path string, baton *Baton) (bool, error) {
 // validateRustBundledCrypto fails a Rust binary carrying crypto outside the system
 // OpenSSL provider, corroborating two signals: defined symbols and the manifest.
 func validateRustBundledCrypto(_ context.Context, path string, baton *Baton) *types.ValidationError {
+	// A present-but-unparseable manifest is corrupt audit evidence. Fail closed
+	// rather than fall through to the absent-manifest warning.
+	if baton.RustAuditErr != nil {
+		return types.NewValidationError(fmt.Errorf("%w: %w", types.ErrRustInvalidAuditable, baton.RustAuditErr))
+	}
 	var symbols []string
 	if exe, err := elf.Open(path); err == nil {
 		symbols = rust.BundledCryptoBackends(exe)

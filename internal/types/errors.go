@@ -28,4 +28,5 @@ var (
 	ErrGoFIPSNotCertified          = errors.New("go binary not built with GOFIPS140 FIPS module")
 	ErrRustBundledCrypto           = errors.New("rust binary bundles unvalidated crypto instead of the system OpenSSL provider")
 	ErrRustNoAuditable             = errors.New("rust binary lacks a cargo-auditable manifest; bundled crypto cannot be ruled out (build with cargo-auditable)")
+	ErrRustInvalidAuditable        = errors.New("rust binary has an unparseable cargo-auditable manifest")
 )

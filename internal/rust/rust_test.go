@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"debug/elf"
 	"encoding/json"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,8 +109,8 @@ func TestLinkedCrypto(t *testing.T) {
 			want: []string{"sha2"},
 		},
 		{
-			name: "build dependency is ignored",
-			sbom: &Sbom{Packages: []Package{{Name: "openssl-src", Kind: "build"}}},
+			name: "non-native build dependency is ignored",
+			sbom: &Sbom{Packages: []Package{{Name: "ring", Kind: "build"}}},
 			want: nil,
 		},
 		{
@@ -118,18 +119,23 @@ func TestLinkedCrypto(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "native-source build dependency is still caught",
+			sbom: &Sbom{Packages: []Package{{Name: "openssl-src", Kind: "build"}}},
+			want: []string{"openssl-src"},
+		},
+		{
 			name: "allowed crate is not flagged",
 			sbom: &Sbom{Packages: []Package{{Name: "serde", Kind: "runtime"}}},
 			want: nil,
 		},
 		{
-			name: "mixed set reports only the runtime denied crates",
+			name: "mixed set reports runtime denied crates and native-source build deps",
 			sbom: &Sbom{Packages: []Package{
 				{Name: "serde", Kind: "runtime"},
 				{Name: "ring", Kind: "runtime"},
 				{Name: "openssl-src", Kind: "build"},
 			}},
-			want: []string{"ring"},
+			want: []string{"ring", "openssl-src"},
 		},
 	}
 	for _, tt := range tests {
@@ -152,6 +158,31 @@ func TestParseAuditable(t *testing.T) {
 func TestParseAuditableRejectsNonZlib(t *testing.T) {
 	_, err := ParseAuditable([]byte("not zlib"))
 	require.Error(t, err)
+}
+
+func TestParseAuditableRejectsZipBomb(t *testing.T) {
+	// A small compressed section that inflates past the decompression cap must
+	// fail rather than be read unbounded into memory.
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	_, err := io.CopyN(zw, zeroReader{}, maxDecompressed+1)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	// Assert on the cap specifically: NUL bytes would make json.Unmarshal error
+	// on their own, so a bare require.Error would pass even without the guard.
+	_, err = ParseAuditable(buf.Bytes())
+	require.ErrorContains(t, err, "exceeds")
+}
+
+// zeroReader is an infinite source of NUL bytes, which compress to almost nothing.
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 func zlibJSON(t *testing.T, v any) []byte {

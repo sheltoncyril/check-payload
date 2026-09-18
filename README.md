@@ -181,7 +181,7 @@ Rust executables are detected by their cargo-auditable section or the `rustc` pr
 1. A symbol scan for a bundled crypto backend (ring, a vendored or static OpenSSL, BoringSSL, or aws-lc). Backends are detected by their defined symbols, not by crate name. Undefined imports of the same names resolve to the system libcrypto and are the compliant case, so they are not flagged.
 1. The cargo-auditable manifest, matched against the `rust_denied_crypto` denylist for crates that bundle crypto, including the pure-Rust primitives that leave no symbol.
 
-Either signal fails the binary. A binary with no cargo-auditable manifest and no bundled-backend symbol is reported as a warning. A pure-Rust primitive leaves no symbol, so it cannot be ruled out from the binary alone. Building Rust binaries with `cargo auditable` gives the manifest the second signal relies on.
+Either signal fails the binary. A binary with no cargo-auditable manifest and no bundled-backend symbol is reported as a warning. A pure-Rust primitive leaves no symbol, so it cannot be ruled out from the binary alone. Building Rust binaries with `cargo auditable` gives the manifest the second signal relies on. A manifest that is present but unparseable is treated as corrupt audit evidence and fails, rather than being downgraded to the absent-manifest warning.
 
 The denylist is configured via `rust_denied_crypto` in the config file. It is a best-effort, non-exhaustive supplement to the structural symbol scan, and is extended in config rather than in code.
 

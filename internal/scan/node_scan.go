@@ -13,6 +13,7 @@ import (
 )
 
 func RunNodeScan(ctx context.Context, cfg *types.Config, root string) []*types.ScanResults {
+	validations.SetRustDeniedCrypto(cfg.RustDeniedCrypto)
 	if !cfg.UseRPMScan {
 		klog.Info("scanning a directory tree")
 		return []*types.ScanResults{walkDirScan(ctx, cfg, nil, nil, root)}

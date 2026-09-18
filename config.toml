@@ -21,8 +21,10 @@ certified_distributions = [
 # chiefly the pure-Rust primitives the symbol scan cannot see. Best-effort and
 # non-exhaustive. Extend here rather than in code.
 rust_denied_crypto = [
-  # bundled or alternative TLS/crypto stacks
-  "ring", "rustls", "aws-lc-rs", "aws-lc-sys", "aws-lc-fips-sys",
+  # bundled or alternative TLS/crypto stacks. rustls is intentionally absent: it
+  # carries no crypto itself, its CryptoProvider does, and that provider crate is
+  # what the symbol scan and this list catch.
+  "ring", "aws-lc-rs", "aws-lc-sys", "aws-lc-fips-sys",
   "boring", "boring-sys", "openssl-src",
   # RustCrypto primitives
   "sha1", "sha2", "sha3", "md-5", "hmac", "aes", "aes-gcm",

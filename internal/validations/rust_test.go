@@ -1,6 +1,8 @@
 package validations
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,22 +10,28 @@ import (
 	"github.com/openshift/check-payload/internal/types"
 )
 
+func TestValidateRustBundledCryptoFailsClosedOnCorruptManifest(t *testing.T) {
+	// A present-but-unparseable manifest must fail as an error, not fall through
+	// to the absent-manifest warning.
+	baton := &Baton{RustAuditErr: errors.New("zlib: invalid header")}
+	got := validateRustBundledCrypto(context.Background(), "", baton)
+	require.NotNil(t, got)
+	require.Equal(t, types.Error, got.Level)
+	require.ErrorIs(t, got.Error, types.ErrRustInvalidAuditable)
+}
+
 func TestSetRustDeniedCrypto(t *testing.T) {
 	orig := rustDeniedCrypto
 	t.Cleanup(func() { rustDeniedCrypto = orig })
 
-	// A non-empty list replaces the active denylist wholesale.
+	// The list is set from config wholesale, with no in-code fallback.
 	SetRustDeniedCrypto([]string{"foo", "bar"})
 	require.Contains(t, rustDeniedCrypto, "foo")
 	require.Contains(t, rustDeniedCrypto, "bar")
-	require.NotContains(t, rustDeniedCrypto, "ring")
-	// The built-in default is never mutated in place.
-	require.Contains(t, defaultDeniedRustCrypto, "ring")
 
-	// An empty list is a no-op: it does not clear a prior replace.
+	// An empty config list leaves an empty denylist (the symbol scan still runs).
 	SetRustDeniedCrypto(nil)
-	require.Contains(t, rustDeniedCrypto, "foo")
-	require.NotContains(t, rustDeniedCrypto, "ring")
+	require.Empty(t, rustDeniedCrypto)
 }
 
 func TestClassifyRustCrypto(t *testing.T) {
