@@ -275,6 +275,47 @@ func TestReadAuditableSectionCapsUnderstatedSize(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 }
 
+func TestCommentHasRustc(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{"rustc marker present among version strings", []byte("GCC: (GNU) 13.3.1\x00rustc version 1.80.0\x00"), true},
+		{"no rust marker", []byte("GCC: (GNU) 13.3.1\x00clang version 17\x00"), false},
+		{"marker within the cap is found", append(bytes.Repeat([]byte("x"), 1024), []byte("rustc")...), true},
+		{"empty section", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, commentHasRustc(bytes.NewReader(tt.data)))
+		})
+	}
+}
+
+func TestCommentHasRustcBoundsTheRead(t *testing.T) {
+	// A marker past the scan limit is not read, proving the prefix is bounded so
+	// a crafted large .comment is never materialized whole.
+	beyond := append(bytes.Repeat([]byte("x"), commentScanLimit), []byte("rustc")...)
+	require.False(t, commentHasRustc(bytes.NewReader(beyond)))
+
+	// An unbounded section consumes at most the cap, not its full declared size.
+	cr := &countingReader{}
+	require.False(t, commentHasRustc(cr))
+	require.LessOrEqual(t, cr.n, commentScanLimit)
+}
+
+// countingReader is an infinite source of NUL bytes that records how much was read.
+type countingReader struct{ n int }
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	c.n += len(p)
+	return len(p), nil
+}
+
 // failReader fails the test if read; it proves the size guard short-circuits
 // before touching section data.
 type failReader struct{ t *testing.T }

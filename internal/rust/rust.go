@@ -25,6 +25,12 @@ const (
 	maxDecompressed = 8 << 20 // 8 MiB on the decompressed manifest
 )
 
+// commentScanLimit bounds the .comment read for the rustc producer marker.
+// .comment holds NUL-separated compiler version strings and is tiny in practice;
+// the marker sits at the start, so a bounded prefix does not miss a real Rust
+// binary while a crafted large section is capped rather than read whole.
+const commentScanLimit = 64 << 10 // 64 KiB
+
 // Package is one crate from the cargo-auditable manifest.
 type Package struct {
 	Name    string `json:"name"`
@@ -38,17 +44,25 @@ type Sbom struct {
 	Packages []Package `json:"packages"`
 }
 
-// IsRustExecutable reports whether the ELF was produced by rustc.
+// IsRustExecutable reports whether the ELF was produced by rustc. It is a
+// best-effort producer heuristic, not an adversarial boundary: a stripped or
+// crafted binary can defeat it and fall to the regular-executable arm.
 func IsRustExecutable(f *elf.File) bool {
 	if f.Section(auditableSection) != nil {
 		return true
 	}
 	if sect := f.Section(".comment"); sect != nil {
-		if data, err := sect.Data(); err == nil && bytes.Contains(data, []byte("rustc")) {
-			return true
-		}
+		return commentHasRustc(sect.Open())
 	}
 	return false
+}
+
+// commentHasRustc reports whether the rustc producer marker appears in the
+// bounded prefix of a .comment section, so a crafted large section is not read
+// whole.
+func commentHasRustc(r io.Reader) bool {
+	data, err := io.ReadAll(io.LimitReader(r, commentScanLimit))
+	return err == nil && bytes.Contains(data, []byte("rustc"))
 }
 
 // ReadAuditable returns the cargo-auditable manifest, or nil if absent.
