@@ -3,6 +3,7 @@ package rust
 
 import (
 	"bytes"
+	"cmp"
 	"compress/zlib"
 	"debug/elf"
 	"encoding/json"
@@ -111,44 +112,91 @@ var backendFamilies = map[string][]string{
 	"ring":            {"ring"},
 }
 
+// candidateSource records how a crypto candidate was detected.
+const (
+	SourceManifest = "manifest" // named in the cargo-auditable crate list, carries a version
+	SourceSymbol   = "symbol"   // inferred from a defined ELF symbol, no version
+)
+
+// Candidate is a bundled crypto provider detected in a binary, with the version
+// and evidence source used to attest it. Version is empty for symbol backends.
+type Candidate struct {
+	Name    string
+	Version string
+	Source  string
+}
+
+// wrapperBackends folds a wrapper crate into the backend that carries the
+// provider identity when both are present. aws-lc-rs built with features=["fips"]
+// pulls aws-lc-fips-sys; the fips backend is the authoritative FIPS provider and
+// carries the version, so the ambiguous wrapper is dropped in its favor. A
+// wrapper seen without its fips backend stays a candidate and must be attested.
+var wrapperBackends = map[string]string{
+	"aws-lc-rs": "aws-lc-fips-sys",
+}
+
 // CryptoModuleCandidates names the bundled crypto providers a binary carries, as
-// module names the certified-module path can attest. Manifest crate names win over
-// the coarser symbol backends.
-func CryptoModuleCandidates(sbom *Sbom, denied map[string]struct{}, symbolBackends []string) []string {
+// candidates the certified-module path can attest. Manifest crates win over the
+// coarser symbol backends, and a wrapper crate folds into its FIPS backend.
+func CryptoModuleCandidates(sbom *Sbom, denied map[string]struct{}, symbolBackends []string) []Candidate {
 	crates := sbom.LinkedCrypto(denied)
 	out := slices.Clone(crates)
 	for _, backend := range symbolBackends {
 		if !familyNamed(backendFamilies[backend], crates) {
-			out = append(out, backend)
+			out = append(out, Candidate{Name: backend, Source: SourceSymbol})
 		}
 	}
-	slices.Sort(out)
+	out = collapseWrappers(out)
+	slices.SortFunc(out, func(a, b Candidate) int {
+		return cmp.Or(
+			cmp.Compare(a.Name, b.Name),
+			cmp.Compare(a.Version, b.Version),
+			cmp.Compare(a.Source, b.Source),
+		)
+	})
 	return slices.Compact(out)
 }
 
-func familyNamed(family, crates []string) bool {
-	for _, c := range crates {
-		if slices.Contains(family, c) {
-			return true
-		}
+// collapseWrappers drops a wrapper crate when its FIPS backend is also present,
+// so the combined evidence maps to a single provider identity.
+func collapseWrappers(candidates []Candidate) []Candidate {
+	present := make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		present[c.Name] = struct{}{}
 	}
-	return false
+	return slices.DeleteFunc(candidates, func(c Candidate) bool {
+		backend, ok := wrapperBackends[c.Name]
+		if !ok {
+			return false
+		}
+		_, hasBackend := present[backend]
+		return hasBackend
+	})
 }
 
-// LinkedCrypto returns denied crypto crates linked in. Build and dev deps are
-// ignored except for native-source crates, which still link runtime crypto.
-func (s *Sbom) LinkedCrypto(denied map[string]struct{}) []string {
+// familyNamed reports whether any candidate names a crate in the family, so a
+// coarse symbol backend is dropped when the manifest already names its provider.
+func familyNamed(family []string, candidates []Candidate) bool {
+	return slices.ContainsFunc(candidates, func(c Candidate) bool {
+		return slices.Contains(family, c.Name)
+	})
+}
+
+// LinkedCrypto returns denied crypto crates linked in, with their manifest
+// versions. Build and dev deps are ignored except for native-source crates,
+// which still link runtime crypto.
+func (s *Sbom) LinkedCrypto(denied map[string]struct{}) []Candidate {
 	if s == nil {
 		return nil
 	}
-	var found []string
+	var found []Candidate
 	for _, p := range s.Packages {
 		_, native := nativeSourceCrates[p.Name]
 		if !native && p.Kind != "" && p.Kind != "runtime" {
 			continue
 		}
 		if _, bad := denied[p.Name]; bad {
-			found = append(found, p.Name)
+			found = append(found, Candidate{Name: p.Name, Version: p.Version, Source: SourceManifest})
 		}
 	}
 	return found

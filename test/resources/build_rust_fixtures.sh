@@ -11,7 +11,7 @@ set -euo pipefail
 # Fixture matrix (expected scanner verdict, with no Rust module attested):
 #   ring-bin       ring runtime dep, cargo-auditable   (FAIL: provider not attested)
 #   rustcrypto     pure-Rust sha2, no bundled backend  (FAIL: provider not attested)
-#   clean          no crypto, cargo-auditable          (PASS)
+#   clean          no crypto, cargo-auditable          (WARN: no provider, indeterminate)
 #   clean-noaudit  no crypto, built without auditable  (WARN: no manifest)
 #   ring-stripped  ring binary, .dep-v0 removed + strip (WARN: no provider detected)
 #   ring-corrupt   ring binary, .dep-v0 overwritten     (FAIL: unparseable manifest)

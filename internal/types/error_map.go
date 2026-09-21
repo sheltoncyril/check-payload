@@ -25,4 +25,5 @@ var KnownErrors = map[string]error {
 	"ErrRustBundledCrypto": ErrRustBundledCrypto,
 	"ErrRustInvalidAuditable": ErrRustInvalidAuditable,
 	"ErrRustNoAuditable": ErrRustNoAuditable,
+	"ErrRustNoProvider": ErrRustNoProvider,
 }

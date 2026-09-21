@@ -66,9 +66,13 @@ func TestScanRealRustBinary(t *testing.T) {
 			note:      "present-but-unparseable manifest fails closed",
 		},
 		{
-			name:        "clean",
-			wantSuccess: true,
-			note:        "no crypto, manifest present",
+			name:      "clean",
+			wantLevel: types.Warning,
+			wantIs:    types.ErrRustNoProvider,
+			// The denylist is non-exhaustive, so a manifest with no denied crate and
+			// no system-OpenSSL linkage is not positive evidence of compliance. It is
+			// inconclusive, not a pass.
+			note: "no denied crate, manifest present, no system openssl: indeterminate",
 		},
 		{
 			name:      "clean-noaudit",

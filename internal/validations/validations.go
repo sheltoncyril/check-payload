@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -101,16 +102,38 @@ func SetRustDeniedCrypto(crates []string) {
 	rustDeniedCrypto = m
 }
 
-// rustCertifiedModules holds the module names attested in fips_certified_modules.
-// A detected Rust provider passes the inline gate only if it is named here.
-var rustCertifiedModules map[string]struct{}
+// certifiedModule is a configured attestation for one module name: the version
+// range a detected provider crate must satisfy. An empty range attests on the
+// name alone.
+type certifiedModule struct {
+	minVersion string
+	maxVersion string
+}
 
-// SetRustCertifiedModules records the attested module names. Call once per scan
-// before workers start, so it stays race-free.
+// accepts reports whether a detected crate version satisfies this entry. A crate
+// with no version (a symbol-only backend) cannot satisfy a configured range.
+func (cm certifiedModule) accepts(version string) bool {
+	if cm.minVersion == "" && cm.maxVersion == "" {
+		return true
+	}
+	atLeast, atMost := types.VersionInRange(version, cm.minVersion, cm.maxVersion)
+	return atLeast && atMost
+}
+
+// rustCertifiedModules maps each attested module name to its configured version
+// ranges. A detected Rust provider passes the inline gate only if it is named
+// here and its crate version satisfies one of the ranges.
+var rustCertifiedModules map[string][]certifiedModule
+
+// SetRustCertifiedModules records the attested modules and their version ranges.
+// Call once per scan before workers start, so it stays race-free.
 func SetRustCertifiedModules(modules []types.FipsModule) {
-	m := make(map[string]struct{}, len(modules))
+	m := make(map[string][]certifiedModule, len(modules))
 	for _, mod := range modules {
-		m[mod.Module] = struct{}{}
+		m[mod.Module] = append(m[mod.Module], certifiedModule{
+			minVersion: mod.CertifiedArtifactMinVersion,
+			maxVersion: mod.CertifiedArtifactMaxVersion,
+		})
 	}
 	rustCertifiedModules = m
 }
@@ -133,9 +156,8 @@ var validationFns = map[string][]ValidationFn{
 		validateExeOpenssl,
 	},
 	"rust": {
-		validateNotStatic,  // a static Rust binary carries its own crypto
-		validateExeOpenssl, // record system-OpenSSL linkage for the report
-		validateRustCrypto, // require detected crypto to be an attested module
+		validateExeOpenssl, // record system-OpenSSL linkage as positive evidence
+		validateRustCrypto, // attestation-first verdict; also owns the static rule
 	},
 }
 
@@ -516,9 +538,13 @@ func isRustExecutable(path string, baton *Baton) (bool, error) {
 	return true, nil
 }
 
-// validateRustCrypto fails unless every detected bundled crypto provider is an
-// attested certified module. Attested ones become module candidates for the
-// certified-module phase. An unattested one fails inline, covering the node RPM scan.
+// validateRustCrypto renders a FIPS verdict for a Rust binary from positive
+// provider evidence, attestation first. An attested bundled provider passes even
+// when statically linked, because the binary carries its own certified crypto.
+// System OpenSSL linkage (recorded by validateExeOpenssl) is the compliant
+// dynamic case. Only when neither is present does it fall back to the static
+// rule, and otherwise to an inconclusive warning: the denylist is non-exhaustive,
+// so an absent hit is not proof of compliance.
 func validateRustCrypto(_ context.Context, _ string, baton *Baton) *types.ValidationError {
 	// A present-but-unparseable manifest is corrupt audit evidence. Fail closed
 	// rather than fall through to the absent-manifest warning.
@@ -526,29 +552,61 @@ func validateRustCrypto(_ context.Context, _ string, baton *Baton) *types.Valida
 		return types.NewValidationError(fmt.Errorf("%w: %w", types.ErrRustInvalidAuditable, baton.RustAuditErr))
 	}
 	candidates := rust.CryptoModuleCandidates(baton.RustAudit, rustDeniedCrypto, baton.RustCryptoBackends)
-	attested, verr := classifyRustCrypto(candidates, baton.RustAudit != nil, rustCertifiedModules)
+	attested, unattested := classifyRustCandidates(candidates, rustCertifiedModules)
+
+	hasSystemOpenssl := slices.Contains(baton.ModulesUsed, moduleOpenssl)
 	baton.ModulesUsed = append(baton.ModulesUsed, attested...)
-	return verr
+
+	if len(unattested) > 0 {
+		return types.NewValidationError(fmt.Errorf("%w (%s)", types.ErrRustBundledCrypto, strings.Join(unattested, ", ")))
+	}
+	if len(attested) > 0 {
+		return nil // attested bundled provider; static linkage is expected
+	}
+	if hasSystemOpenssl {
+		return nil // system OpenSSL FIPS provider: the compliant dynamic case
+	}
+	if baton.Static {
+		// No provider and statically linked, so it cannot use the system crypto.
+		return types.NewValidationError(types.ErrNotDynLinked)
+	}
+	if baton.RustAudit != nil {
+		return types.NewValidationError(types.ErrRustNoProvider).SetWarning()
+	}
+	return types.NewValidationError(types.ErrRustNoAuditable).SetWarning()
 }
 
-// classifyRustCrypto splits candidates into attested modules and unattested
-// failures. No candidate and no manifest is inconclusive and warns.
-func classifyRustCrypto(candidates []string, hasManifest bool, certified map[string]struct{}) ([]string, *types.ValidationError) {
-	var attested, unattested []string
-	for _, m := range candidates {
-		if _, ok := certified[m]; ok {
-			attested = append(attested, m)
+// classifyRustCandidates splits candidates into attested module names and
+// unattested labels, enforcing each module's configured version range.
+func classifyRustCandidates(candidates []rust.Candidate, certified map[string][]certifiedModule) (attested, unattested []string) {
+	for _, c := range candidates {
+		if attestRustCandidate(c, certified) {
+			attested = append(attested, c.Name)
 		} else {
-			unattested = append(unattested, m)
+			unattested = append(unattested, rustCandidateLabel(c))
 		}
 	}
-	if len(unattested) > 0 {
-		return attested, types.NewValidationError(fmt.Errorf("%w (%s)", types.ErrRustBundledCrypto, strings.Join(unattested, ", ")))
+	return attested, unattested
+}
+
+// attestRustCandidate reports whether a candidate matches a configured module
+// name at an accepted version.
+func attestRustCandidate(c rust.Candidate, certified map[string][]certifiedModule) bool {
+	for _, entry := range certified[c.Name] {
+		if entry.accepts(c.Version) {
+			return true
+		}
 	}
-	if len(candidates) == 0 && !hasManifest {
-		return nil, types.NewValidationError(types.ErrRustNoAuditable).SetWarning()
+	return false
+}
+
+// rustCandidateLabel renders a candidate for an error message, including the
+// crate version when the manifest supplied one.
+func rustCandidateLabel(c rust.Candidate) string {
+	if c.Version != "" {
+		return c.Name + " " + c.Version
 	}
-	return attested, nil
+	return c.Name
 }
 
 // isStatic tells if exe is a static binary.

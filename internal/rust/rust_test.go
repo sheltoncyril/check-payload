@@ -95,18 +95,18 @@ func TestLinkedCrypto(t *testing.T) {
 	tests := []struct {
 		name string
 		sbom *Sbom
-		want []string
+		want []Candidate
 	}{
 		{"nil sbom", nil, nil},
 		{
-			name: "runtime denied crate is found",
-			sbom: &Sbom{Packages: []Package{{Name: "ring", Kind: "runtime"}}},
-			want: []string{"ring"},
+			name: "runtime denied crate is found with its version",
+			sbom: &Sbom{Packages: []Package{{Name: "ring", Version: "0.17.14", Kind: "runtime"}}},
+			want: []Candidate{{Name: "ring", Version: "0.17.14", Source: SourceManifest}},
 		},
 		{
 			name: "empty kind is treated as runtime",
-			sbom: &Sbom{Packages: []Package{{Name: "sha2", Kind: ""}}},
-			want: []string{"sha2"},
+			sbom: &Sbom{Packages: []Package{{Name: "sha2", Version: "0.10.8", Kind: ""}}},
+			want: []Candidate{{Name: "sha2", Version: "0.10.8", Source: SourceManifest}},
 		},
 		{
 			name: "non-native build dependency is ignored",
@@ -120,8 +120,8 @@ func TestLinkedCrypto(t *testing.T) {
 		},
 		{
 			name: "native-source build dependency is still caught",
-			sbom: &Sbom{Packages: []Package{{Name: "openssl-src", Kind: "build"}}},
-			want: []string{"openssl-src"},
+			sbom: &Sbom{Packages: []Package{{Name: "openssl-src", Version: "300.5.0", Kind: "build"}}},
+			want: []Candidate{{Name: "openssl-src", Version: "300.5.0", Source: SourceManifest}},
 		},
 		{
 			name: "allowed crate is not flagged",
@@ -132,10 +132,13 @@ func TestLinkedCrypto(t *testing.T) {
 			name: "mixed set reports runtime denied crates and native-source build deps",
 			sbom: &Sbom{Packages: []Package{
 				{Name: "serde", Kind: "runtime"},
-				{Name: "ring", Kind: "runtime"},
-				{Name: "openssl-src", Kind: "build"},
+				{Name: "ring", Version: "0.17.14", Kind: "runtime"},
+				{Name: "openssl-src", Version: "300.5.0", Kind: "build"},
 			}},
-			want: []string{"ring", "openssl-src"},
+			want: []Candidate{
+				{Name: "ring", Version: "0.17.14", Source: SourceManifest},
+				{Name: "openssl-src", Version: "300.5.0", Source: SourceManifest},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -147,47 +150,64 @@ func TestLinkedCrypto(t *testing.T) {
 
 func TestCryptoModuleCandidates(t *testing.T) {
 	denied := map[string]struct{}{
-		"ring": {}, "sha2": {}, "openssl-src": {}, "aws-lc-fips-sys": {}, "aws-lc-sys": {},
+		"ring": {}, "sha2": {}, "openssl-src": {}, "aws-lc-rs": {}, "aws-lc-fips-sys": {}, "aws-lc-sys": {},
 	}
 
 	tests := []struct {
 		name    string
 		sbom    *Sbom
 		symbols []string
-		want    []string
+		want    []Candidate
 	}{
 		{
 			name:    "no manifest falls back to symbol backends",
 			symbols: []string{"ring", "bundled-openssl"},
-			want:    []string{"bundled-openssl", "ring"},
+			want: []Candidate{
+				{Name: "bundled-openssl", Source: SourceSymbol},
+				{Name: "ring", Source: SourceSymbol},
+			},
 		},
 		{
-			name:    "manifest crate and its symbol backend dedup to one name",
-			sbom:    &Sbom{Packages: []Package{{Name: "ring", Kind: "runtime"}}},
+			name:    "manifest crate and its symbol backend dedup to one candidate",
+			sbom:    &Sbom{Packages: []Package{{Name: "ring", Version: "0.17.14", Kind: "runtime"}}},
 			symbols: []string{"ring"},
-			want:    []string{"ring"},
+			want:    []Candidate{{Name: "ring", Version: "0.17.14", Source: SourceManifest}},
 		},
 		{
 			name:    "precise fips crate suppresses the coarse aws-lc symbol",
-			sbom:    &Sbom{Packages: []Package{{Name: "aws-lc-fips-sys", Kind: "build"}}},
+			sbom:    &Sbom{Packages: []Package{{Name: "aws-lc-fips-sys", Version: "0.13.3", Kind: "build"}}},
 			symbols: []string{"aws-lc"},
-			want:    []string{"aws-lc-fips-sys"},
+			want:    []Candidate{{Name: "aws-lc-fips-sys", Version: "0.13.3", Source: SourceManifest}},
 		},
 		{
 			name:    "symbol backend with no manifest crate of its family is kept",
 			sbom:    &Sbom{Packages: []Package{{Name: "serde", Kind: "runtime"}}},
 			symbols: []string{"aws-lc"},
-			want:    []string{"aws-lc"},
+			want:    []Candidate{{Name: "aws-lc", Source: SourceSymbol}},
 		},
 		{
 			name: "pure-Rust primitive from the manifest with no symbol",
-			sbom: &Sbom{Packages: []Package{{Name: "sha2", Kind: "runtime"}}},
-			want: []string{"sha2"},
+			sbom: &Sbom{Packages: []Package{{Name: "sha2", Version: "0.10.8", Kind: "runtime"}}},
+			want: []Candidate{{Name: "sha2", Version: "0.10.8", Source: SourceManifest}},
 		},
 		{
 			name: "clean binary yields no candidate",
 			sbom: &Sbom{Packages: []Package{{Name: "serde", Kind: "runtime"}}},
 			want: nil,
+		},
+		{
+			name: "aws-lc-rs wrapper folds into its fips backend, keeping the backend version",
+			sbom: &Sbom{Packages: []Package{
+				{Name: "aws-lc-rs", Version: "1.13.0", Kind: "runtime"},
+				{Name: "aws-lc-fips-sys", Version: "0.13.3", Kind: "build"},
+			}},
+			symbols: []string{"aws-lc"},
+			want:    []Candidate{{Name: "aws-lc-fips-sys", Version: "0.13.3", Source: SourceManifest}},
+		},
+		{
+			name: "aws-lc-rs wrapper without its fips backend stays a candidate",
+			sbom: &Sbom{Packages: []Package{{Name: "aws-lc-rs", Version: "1.13.0", Kind: "runtime"}}},
+			want: []Candidate{{Name: "aws-lc-rs", Version: "1.13.0", Source: SourceManifest}},
 		},
 	}
 	for _, tt := range tests {
