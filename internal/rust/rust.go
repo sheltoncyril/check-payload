@@ -15,10 +15,12 @@ import (
 // auditableSection holds cargo-auditable's zlib-compressed JSON crate list.
 const auditableSection = ".dep-v0"
 
-// Decompression bounds for the untrusted .dep-v0 section, matching
-// cargo-auditable's own limits (guarding against zip bombs).
+// Bounds for the untrusted .dep-v0 section. Real manifests are a few KB; both
+// caps are deliberately generous while keeping a crafted section from forcing a
+// large read. The section is read through a bounded stream, so its declared size
+// is never trusted to allocate.
 const (
-	maxCompressed   = 1 << 30 // 1 GiB on the section fed to the decompressor
+	maxCompressed   = 8 << 20 // 8 MiB on the raw section fed to the decompressor
 	maxDecompressed = 8 << 20 // 8 MiB on the decompressed manifest
 )
 
@@ -54,19 +56,29 @@ func ReadAuditable(f *elf.File) (*Sbom, error) {
 	if sect == nil {
 		return nil, nil
 	}
-	if sect.Size > maxCompressed {
-		return nil, fmt.Errorf("cargo-auditable section is %d bytes, over the %d limit", sect.Size, maxCompressed)
+	return readAuditableSection(sect.Size, sect.Open())
+}
+
+// readAuditableSection reads a .dep-v0 section through a bounded stream. The
+// declared size is checked first, then the stream itself is capped, so a crafted
+// section header cannot force an allocation of its declared size before the
+// decompression bound applies.
+func readAuditableSection(size uint64, r io.Reader) (*Sbom, error) {
+	if size > maxCompressed {
+		return nil, fmt.Errorf("cargo-auditable section is %d bytes, over the %d limit", size, maxCompressed)
 	}
-	raw, err := sect.Data()
-	if err != nil {
-		return nil, err
-	}
-	return ParseAuditable(raw)
+	return parseAuditableStream(io.LimitReader(r, maxCompressed))
 }
 
 // ParseAuditable decodes the zlib-JSON of a cargo-auditable section.
 func ParseAuditable(compressed []byte) (*Sbom, error) {
-	zr, err := zlib.NewReader(bytes.NewReader(compressed))
+	return parseAuditableStream(bytes.NewReader(compressed))
+}
+
+// parseAuditableStream decodes zlib-JSON from a reader, bounding the decompressed
+// output so a small compressed stream cannot inflate without limit.
+func parseAuditableStream(r io.Reader) (*Sbom, error) {
+	zr, err := zlib.NewReader(r)
 	if err != nil {
 		return nil, err
 	}

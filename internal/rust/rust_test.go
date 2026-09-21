@@ -227,6 +227,43 @@ func TestParseAuditableRejectsZipBomb(t *testing.T) {
 	require.ErrorContains(t, err, "exceeds")
 }
 
+func TestReadAuditableSectionRejectsOversizedSection(t *testing.T) {
+	// A section that declares a size over the cap must be rejected before its
+	// data is read, so a crafted header cannot force an allocation of that size.
+	_, err := readAuditableSection(maxCompressed+1, failReader{t})
+	require.ErrorContains(t, err, "over the")
+}
+
+func TestReadAuditableSectionParsesValidStream(t *testing.T) {
+	want := &Sbom{Packages: []Package{{Name: "ring", Version: "0.17.14", Kind: "runtime"}}}
+	raw := zlibJSON(t, want)
+	got, err := readAuditableSection(uint64(len(raw)), bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
+func TestReadAuditableSectionCapsUnderstatedSize(t *testing.T) {
+	// A section whose declared size is small but whose stream inflates past the
+	// decompressed cap must fail on the cap, not read unbounded.
+	var buf bytes.Buffer
+	zw := zlib.NewWriter(&buf)
+	_, err := io.CopyN(zw, zeroReader{}, maxDecompressed+1)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	_, err = readAuditableSection(1, &buf)
+	require.ErrorContains(t, err, "exceeds")
+}
+
+// failReader fails the test if read; it proves the size guard short-circuits
+// before touching section data.
+type failReader struct{ t *testing.T }
+
+func (f failReader) Read([]byte) (int, error) {
+	f.t.Fatal("read attempted on an oversized section; size guard did not short-circuit")
+	return 0, nil
+}
+
 // zeroReader is an infinite source of NUL bytes, which compress to almost nothing.
 type zeroReader struct{}
 
