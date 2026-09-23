@@ -17,6 +17,21 @@ certified_distributions = [
   "Red Hat Enterprise Linux release 10.2 (Coughlan)",
 ]
 
+# Rust crates that provide crypto outside the system OpenSSL FIPS provider,
+# chiefly the pure-Rust primitives the symbol scan cannot see. Best-effort and
+# non-exhaustive. Extend here rather than in code.
+rust_denied_crypto = [
+  # bundled or alternative TLS/crypto stacks. rustls is intentionally absent: it
+  # carries no crypto itself, its CryptoProvider does, and that provider crate is
+  # what the symbol scan and this list catch.
+  "ring", "aws-lc-rs", "aws-lc-sys", "aws-lc-fips-sys",
+  "boring", "boring-sys", "openssl-src",
+  # RustCrypto primitives
+  "sha1", "sha2", "sha3", "md-5", "hmac", "aes", "aes-gcm",
+  "chacha20poly1305", "ctr", "cbc", "rsa", "ecdsa",
+  "ed25519-dalek", "curve25519-dalek", "x25519-dalek", "p256", "p384",
+]
+
 # FIPS certified modules. Multiple entries per module are alternatives — first match wins.
 fips_certified_modules = [
   # OpenSSL 3.x FIPS Provider (CMVP #4857) — RHEL 9.4+ and RHEL 10 (pending OE update)

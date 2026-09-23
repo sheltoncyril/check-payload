@@ -152,6 +152,16 @@ func validateOverlaps(listname string, perr *error, files, dirs []string) {
 	}
 }
 
+// ApplyRustDeniedFloor unions floor into RustDeniedCrypto so an explicit
+// --config augments the shipped denylist instead of silently replacing it.
+func (c *ConfigFile) ApplyRustDeniedFloor(floor []string) {
+	for _, crate := range floor {
+		if !contains(c.RustDeniedCrypto, crate) {
+			c.RustDeniedCrypto = append(c.RustDeniedCrypto, crate)
+		}
+	}
+}
+
 func (c *ConfigFile) Add(add *ConfigFile) error {
 	var err error
 
@@ -159,6 +169,7 @@ func (c *ConfigFile) Add(add *ConfigFile) error {
 	c.FilterDirs = appendUniq("filter_dirs", &err, c.FilterDirs, add.FilterDirs)
 	c.FilterImages = appendUniq("filter_images", &err, c.FilterImages, add.FilterImages)
 	c.CertifiedDistributions = appendUniq("certified_distributions", &err, c.CertifiedDistributions, add.CertifiedDistributions)
+	c.RustDeniedCrypto = appendUniq("rust_denied_crypto", &err, c.RustDeniedCrypto, add.RustDeniedCrypto)
 
 	c.FIPSCertifiedModules = mergeFIPSModules(c.FIPSCertifiedModules, add.FIPSCertifiedModules)
 

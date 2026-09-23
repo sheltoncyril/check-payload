@@ -13,6 +13,8 @@ import (
 )
 
 func RunNodeScan(ctx context.Context, cfg *types.Config, root string) []*types.ScanResults {
+	validations.SetRustDeniedCrypto(cfg.RustDeniedCrypto)
+	validations.SetRustCertifiedModules(cfg.GetFIPSCertifiedModules())
 	if !cfg.UseRPMScan {
 		klog.Info("scanning a directory tree")
 		return []*types.ScanResults{walkDirScan(ctx, cfg, nil, nil, root)}
@@ -69,5 +71,9 @@ func rpmRootScan(ctx context.Context, cfg *types.Config, root string) *types.Sca
 			results.Append(res)
 		}
 	}
+	// Run the module-artifact phase for parity with walkDirScan: inline binary
+	// checks record modules used, but a missing or out-of-range image-source
+	// artifact is only caught here. Gated by UseFIPSModuleValidation.
+	validateModuleArtifactsPhase(ctx, cfg, nil, nil, root, results)
 	return results
 }

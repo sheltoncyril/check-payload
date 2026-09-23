@@ -359,5 +359,13 @@ func getConfig(config *types.ConfigFile) error {
 		}
 	}
 
+	// rust_denied_crypto is a security floor: union the embedded default so an
+	// explicit --config cannot silently disable the Rust manifest signal.
+	floor := &types.ConfigFile{}
+	if _, err := toml.Decode(embeddedConfig, floor); err != nil {
+		panic("invalid embedded config: " + err.Error())
+	}
+	config.ApplyRustDeniedFloor(floor.RustDeniedCrypto)
+
 	return nil
 }
